@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.dunamispub.watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>__REPO__/bin/dunamis-watch</string>
+    </array>
+
+    <!-- Fires when Scrivener rewrites the binder, which is what a drag does. -->
+    <key>WatchPaths</key>
+    <array>
+        <string>__SCRIVX__</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <false/>
+
+    <!-- Never pile up runs while a prompt is on screen. -->
+    <key>ThrottleInterval</key>
+    <integer>15</integer>
+
+    <key>StandardOutPath</key>
+    <string>__HOME__/Library/Logs/dunamispub.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/Library/Logs/dunamispub.err.log</string>
+</dict>
+</plist>

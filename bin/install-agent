@@ -1,0 +1,47 @@
+#!/bin/bash
+# install-agent — render the launchd plist for this machine and load it.
+#
+#   bin/install-agent            install and load
+#   bin/install-agent --remove   unload and delete
+#
+# The agent fires when Scrivener rewrites the binder. It runs read-only and,
+# with publish.dry_run true in config.json, posts nothing.
+
+set -euo pipefail
+
+REPO="$(cd "$(dirname "$0")/.." && pwd)"
+LABEL="com.dunamispub.watch"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+
+if [ "${1:-}" = "--remove" ]; then
+    launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+    rm -f "$PLIST"
+    echo "Removed $LABEL"
+    exit 0
+fi
+
+CONFIG="$REPO/config.json"
+[ -f "$CONFIG" ] || CONFIG="$REPO/config.example.json"
+
+PROJECT=$(python3 -c "import json,os,sys; print(os.path.expanduser(json.load(open(sys.argv[1]))['scrivener']['project_path']))" "$CONFIG")
+SCRIVX=$(ls "$PROJECT"/*.scrivx | head -1)
+
+if [ ! -f "$SCRIVX" ]; then
+    echo "No .scrivx found under $PROJECT" >&2
+    exit 1
+fi
+
+mkdir -p "$HOME/Library/LaunchAgents"
+sed -e "s|__REPO__|$REPO|g" \
+    -e "s|__SCRIVX__|$SCRIVX|g" \
+    -e "s|__HOME__|$HOME|g" \
+    "$REPO/launchd/$LABEL.plist.template" > "$PLIST"
+
+launchctl bootout "gui/$UID/$LABEL" 2>/dev/null || true
+launchctl bootstrap "gui/$UID" "$PLIST"
+
+echo "Installed $LABEL"
+echo "  watching: $SCRIVX"
+echo "  log:      ~/Library/Logs/dunamispub.log"
+echo
+echo "Check what it sees:  bin/dunamis-watch --status"

@@ -1,0 +1,206 @@
+#!/usr/bin/env python3
+"""dunamis-watch — react to a document arriving in Ready to Post.
+
+Triggered by a launchd agent watching the project's .scrivx. Reads the binder,
+finds documents that are newly present in the Ready to Post folder, converts
+each body to Markdown, asks where it should go, and hands off to the publisher.
+
+Read-only against the Scrivener project. Nothing here writes to the package.
+
+  bin/dunamis-watch            normal run, driven by launchd
+  bin/dunamis-watch --once     run immediately, ignoring the settle delay
+  bin/dunamis-watch --status   show what it currently sees, change nothing
+"""
+
+import json
+import os
+import sys
+import time
+import subprocess
+
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(HERE, "lib"))
+
+import binder            # noqa: E402
+import rtf2md            # noqa: E402
+
+STATE_DIR = os.path.expanduser("~/Library/Application Support/DunamisPub")
+STATE_FILE = os.path.join(STATE_DIR, "state.json")
+OUTBOX = os.path.join(STATE_DIR, "outbox")
+LOG = os.path.expanduser("~/Library/Logs/dunamispub.log")
+
+
+def log(msg):
+    line = "%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
+    os.makedirs(os.path.dirname(LOG), exist_ok=True)
+    with open(LOG, "a") as fh:
+        fh.write(line + "\n")
+    print(line)
+
+
+def notify(title, message):
+    subprocess.run([
+        "osascript", "-e",
+        'display notification %s with title %s' % (json.dumps(message), json.dumps(title))
+    ], capture_output=True)
+
+
+def load_config():
+    for name in ("config.json", "config.example.json"):
+        p = os.path.join(HERE, name)
+        if os.path.exists(p):
+            with open(p) as fh:
+                return json.load(fh), name
+    raise SystemExit("No config found. Copy config.example.json to config.json.")
+
+
+def load_state():
+    if os.path.exists(STATE_FILE):
+        with open(STATE_FILE) as fh:
+            return json.load(fh)
+    return {"seen": []}
+
+
+def save_state(state):
+    os.makedirs(STATE_DIR, exist_ok=True)
+    with open(STATE_FILE, "w") as fh:
+        json.dump(state, fh, indent=2)
+
+
+def settle(path, seconds):
+    """Wait for Scrivener to finish writing before reading the binder."""
+    last = -1
+    deadline = time.time() + seconds + 10
+    while time.time() < deadline:
+        try:
+            now = os.path.getmtime(path)
+        except OSError:
+            time.sleep(1)
+            continue
+        if now == last:
+            return True
+        last = now
+        time.sleep(min(seconds, 2))
+    return True
+
+
+def ask_destination(title, destinations, suggested):
+    """Prompt for a destination. Returns (label, free_text) or (None, None)."""
+    options = [d["label"] for d in destinations] + ["Something else…", "Hold for now"]
+    default = suggested if suggested in options else options[0]
+    script = (
+        'set opts to {%s}\n'
+        'set res to choose from list opts with title "DunamisPub" '
+        'with prompt %s default items {%s}\n'
+        'if res is false then return "CANCEL"\n'
+        'return item 1 of res'
+    ) % (
+        ", ".join(json.dumps(o) for o in options),
+        json.dumps("Where does \u201c%s\u201d go?" % title),
+        json.dumps(default),
+    )
+    out = subprocess.run(["osascript", "-e", script],
+                         capture_output=True, text=True).stdout.strip()
+    if out in ("CANCEL", "", "Hold for now"):
+        return None, None
+    if out == "Something else…":
+        ask = (
+            'set r to display dialog "Describe where this should go:" '
+            'default answer "" with title "DunamisPub"\n'
+            'return text returned of r'
+        )
+        free = subprocess.run(["osascript", "-e", ask],
+                              capture_output=True, text=True).stdout.strip()
+        return "Something else", free
+    return out, None
+
+
+def main():
+    args = sys.argv[1:]
+    config, which = load_config()
+    scr = config["scrivener"]
+    project = binder.Project(scr["project_path"])
+
+    if "--status" not in args:
+        settle(project.scrivx, scr.get("settle_seconds", 5))
+
+    # Canary — a missing folder means the format changed or it was renamed.
+    if not project.folder_exists(scr["ready_folder"]):
+        log("CANARY FAILED: '%s' not found in the binder" % scr["ready_folder"])
+        notify("DunamisPub", "Can't find the Ready to Post folder. Watcher paused.")
+        return 2
+
+    expected = scr.get("expected_format_version")
+    actual = project.format_version
+    if expected and actual != expected:
+        log("Format version is %s, expected %s — reads only, no writes." % (actual, expected))
+
+    docs = project.documents_in(scr["ready_folder"])
+    labels = project.labels()
+    state = load_state()
+    seen = set(state.get("seen", []))
+
+    if "--status" in args:
+        print("Project:  %s" % project.path)
+        print("Config:   %s" % which)
+        print("Open:     %s" % ("yes" if project.is_open else "no"))
+        print("Format:   %s" % actual)
+        print("Ready to Post: %d document(s)" % len(docs))
+        for d in docs:
+            mark = "seen" if d["uuid"] in seen else "NEW"
+            print("  [%s] %s  (label: %s)" % (mark, d["title"], labels.get(d["label"], "—")))
+        return 0
+
+    present = {d["uuid"] for d in docs}
+    # Anything dragged back out becomes eligible again.
+    seen &= present
+
+    new = [d for d in docs if d["uuid"] not in seen]
+    if not new:
+        save_state({"seen": sorted(seen)})
+        return 0
+
+    os.makedirs(OUTBOX, exist_ok=True)
+    dry = config.get("publish", {}).get("dry_run", True)
+
+    for doc in new:
+        topic_id, title = rtf2md.split_title(doc["title"])
+        body = rtf2md.to_markdown(project.content_path(doc["uuid"]))
+        words = len(body.split())
+        slug = rtf2md.slugify(title)
+        stem = "%s-%s" % (topic_id, slug) if topic_id else slug
+        md_path = os.path.join(OUTBOX, stem + ".md")
+
+        front = ["---", "title: %s" % title]
+        if topic_id:
+            front.append("id: %s" % topic_id)
+        if doc["synopsis"]:
+            front.append("synopsis: %s" % doc["synopsis"].replace("\n", " "))
+        front += ["words: %d" % words, "source_uuid: %s" % doc["uuid"], "---", ""]
+        with open(md_path, "w") as fh:
+            fh.write("\n".join(front) + body)
+
+        log("Detected '%s' — %d words → %s" % (doc["title"], words, md_path))
+
+        suggested = labels.get(doc["label"])
+        dest, free_text = ask_destination(title, config["destinations"], suggested)
+        if dest is None:
+            log("Held: '%s' — no destination chosen. Will ask again next run." % title)
+            continue
+
+        seen.add(doc["uuid"])
+        detail = "%s%s" % (dest, (" — %s" % free_text) if free_text else "")
+        if dry:
+            log("DRY RUN: would publish '%s' to %s" % (title, detail))
+            notify("DunamisPub — dry run", "%s → %s (%d words)" % (title, detail, words))
+        else:
+            log("Publishing '%s' to %s" % (title, detail))
+            publisher = os.path.join(HERE, "bin", "dunamis-publish")
+            subprocess.run([publisher, md_path, dest] + ([free_text] if free_text else []))
+
+    save_state({"seen": sorted(seen)})
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
