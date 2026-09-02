@@ -1,0 +1,107 @@
+#!/usr/bin/env python3
+"""dunamis-auth — get a WordPress.com token via the authorization-code flow.
+
+  bin/dunamis-auth <keychain-item-name>
+
+Starts a one-shot local server on the redirect port, opens WordPress.com's
+authorization page, catches the code it sends back, exchanges it for an access
+token, and stores the token in the macOS Keychain.
+
+The only manual step is clicking Approve. No password is ever typed here.
+
+WordPress.com restricts the simpler password grant to approved applications;
+a freshly created app is refused with "Unknown client_id" even when the ID is
+correct. This flow works for any app.
+"""
+
+import http.server
+import json
+import subprocess
+import sys
+import threading
+import urllib.parse
+import urllib.request
+import webbrowser
+
+AUTHORIZE = "https://public-api.wordpress.com/oauth2/authorize"
+TOKEN = "https://public-api.wordpress.com/oauth2/token"
+PORT = 8080
+REDIRECT = "http://localhost:%d/callback" % PORT
+
+received = {}
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        query = urllib.parse.urlparse(self.path).query
+        params = urllib.parse.parse_qs(query)
+        received.update({k: v[0] for k, v in params.items()})
+        ok = "code" in received
+        body = ("<h2>%s</h2><p>You can close this tab and return to the terminal.</p>"
+                % ("Authorized." if ok else "No code received."))
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(body.encode("utf-8"))
+        threading.Thread(target=self.server.shutdown, daemon=True).start()
+
+    def log_message(self, *args):
+        pass                      # keep the terminal clean
+
+
+def main():
+    if len(sys.argv) < 2:
+        raise SystemExit("Usage: bin/dunamis-auth <keychain-item-name>")
+    item = sys.argv[1]
+
+    client_id = input("WordPress.com Client ID: ").strip()
+    import getpass
+    client_secret = getpass.getpass("Client Secret: ").strip()
+
+    url = "%s?%s" % (AUTHORIZE, urllib.parse.urlencode({
+        "client_id": client_id,
+        "redirect_uri": REDIRECT,
+        "response_type": "code",
+        "scope": "global",
+    }))
+
+    server = http.server.HTTPServer(("localhost", PORT), Handler)
+    print("\nOpening WordPress.com for approval...")
+    print("If your browser doesn't open, paste this in:\n\n%s\n" % url)
+    webbrowser.open(url)
+    print("Waiting for the redirect on %s ..." % REDIRECT)
+    server.serve_forever()
+    server.server_close()
+
+    if "code" not in received:
+        raise SystemExit("No authorization code came back: %s" % received)
+
+    data = urllib.parse.urlencode({
+        "client_id": client_id,
+        "client_secret": client_secret,
+        "redirect_uri": REDIRECT,
+        "grant_type": "authorization_code",
+        "code": received["code"],
+    }).encode("utf-8")
+
+    with urllib.request.urlopen(urllib.request.Request(TOKEN, data=data)) as resp:
+        payload = json.load(resp)
+
+    token = payload.get("access_token")
+    if not token:
+        raise SystemExit("No access token in the response: %s" % payload)
+
+    subprocess.run(["security", "add-generic-password", "-U",
+                    "-a", "wordpress.com", "-s", item, "-w", token], check=True)
+    print("Token stored in the Keychain as '%s'." % item)
+
+    req = urllib.request.Request(
+        "https://public-api.wordpress.com/rest/v1.1/me",
+        headers={"Authorization": "Bearer %s" % token})
+    with urllib.request.urlopen(req) as resp:
+        me = json.load(resp)
+    print("Verified - authenticated as %s" % me.get("username", "?"))
+
+
+if __name__ == "__main__":
+    main()

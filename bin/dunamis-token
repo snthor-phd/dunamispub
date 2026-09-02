@@ -28,13 +28,20 @@ read -r -s -p "Client Secret: " CLIENT_SECRET; echo
 read -r -p "WordPress.com username: " USERNAME
 read -r -s -p "Application Password: " APP_PASSWORD; echo
 
+if [ "${DEBUG:-}" = "1" ]; then
+    echo "client_id bytes:"; printf %s "$CLIENT_ID" | od -c | head -3
+    echo "client_id length: ${#CLIENT_ID}  secret length: ${#CLIENT_SECRET}"
+fi
+
 echo "Requesting token..."
+# --data-urlencode, not -d: secrets and passwords routinely contain & + % =,
+# which curl would otherwise send raw and split into extra form fields.
 RESPONSE=$(curl -sS -X POST "https://public-api.wordpress.com/oauth2/token" \
-    -d "client_id=$CLIENT_ID" \
-    -d "client_secret=$CLIENT_SECRET" \
-    -d "grant_type=password" \
-    -d "username=$USERNAME" \
-    -d "password=$APP_PASSWORD")
+    --data-urlencode "client_id=$CLIENT_ID" \
+    --data-urlencode "client_secret=$CLIENT_SECRET" \
+    --data-urlencode "grant_type=password" \
+    --data-urlencode "username=$USERNAME" \
+    --data-urlencode "password=$APP_PASSWORD")
 
 TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))' <<<"$RESPONSE")
 
