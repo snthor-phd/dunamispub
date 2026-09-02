@@ -2,13 +2,12 @@
 """dunamis-watch — react to a document arriving in Ready to Post.
 
 Triggered by a launchd agent watching the project's .scrivx. Reads the binder,
-finds documents that are newly present in the Ready to Post folder, converts
-each body to Markdown, asks where it should go, and hands off to the publisher.
+finds documents newly present in the Ready to Post folder, converts each body
+to Markdown, asks where it should go, and hands off to the publisher.
 
 Read-only against the Scrivener project. Nothing here writes to the package.
 
   bin/dunamis-watch            normal run, driven by launchd
-  bin/dunamis-watch --once     run immediately, ignoring the settle delay
   bin/dunamis-watch --status   show what it currently sees, change nothing
 """
 
@@ -29,6 +28,8 @@ STATE_FILE = os.path.join(STATE_DIR, "state.json")
 OUTBOX = os.path.join(STATE_DIR, "outbox")
 LOG = os.path.expanduser("~/Library/Logs/dunamispub.log")
 
+ELLIPSIS = "Something else..."
+
 
 def log(msg):
     line = "%s  %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), msg)
@@ -38,11 +39,27 @@ def log(msg):
     print(line)
 
 
+def q(s):
+    """Quote a Python string for AppleScript.
+
+    json.dumps escapes non-ASCII as \\uXXXX, which AppleScript cannot parse -
+    it fails with a syntax error rather than showing the dialog. ensure_ascii
+    False passes the characters through literally.
+    """
+    return json.dumps(s, ensure_ascii=False)
+
+
+def osa(script):
+    """Run AppleScript. Returns (stdout, stderr); errors are logged, not swallowed."""
+    r = subprocess.run(["osascript", "-e", script], capture_output=True, text=True)
+    if r.returncode != 0 and r.stderr.strip():
+        log("osascript error: %s" % r.stderr.strip())
+    return r.stdout.strip(), r.stderr.strip()
+
+
 def notify(title, message):
-    subprocess.run([
-        "osascript", "-e",
-        'display notification %s with title %s' % (json.dumps(message), json.dumps(title))
-    ], capture_output=True)
+    osa('display notification %s with title %s'
+        % (q(message), q(title)))
 
 
 def load_config():
@@ -78,41 +95,51 @@ def settle(path, seconds):
             time.sleep(1)
             continue
         if now == last:
-            return True
+            return
         last = now
         time.sleep(min(seconds, 2))
-    return True
 
 
 def ask_destination(title, destinations, suggested):
-    """Prompt for a destination. Returns (label, free_text) or (None, None)."""
-    options = [d["label"] for d in destinations] + ["Something else…", "Hold for now"]
+    """Prompt for a destination. Returns (label, free_text, error).
+
+    The prompt goes through System Events and is activated explicitly. A
+    launchd agent has no frontmost application of its own, so a bare
+    `choose from list` never reaches the screen and returns false straight
+    away — indistinguishable from the user cancelling.
+    """
+    options = [d["label"] for d in destinations] + [ELLIPSIS, "Hold for now"]
     default = suggested if suggested in options else options[0]
     script = (
-        'set opts to {%s}\n'
-        'set res to choose from list opts with title "DunamisPub" '
+        'tell application "System Events"\n'
+        '    activate\n'
+        '    set res to choose from list {%s} with title "DunamisPub" '
         'with prompt %s default items {%s}\n'
+        'end tell\n'
         'if res is false then return "CANCEL"\n'
         'return item 1 of res'
     ) % (
-        ", ".join(json.dumps(o) for o in options),
-        json.dumps("Where does \u201c%s\u201d go?" % title),
-        json.dumps(default),
+        ", ".join(q(o) for o in options),
+        q("Where does %s go?" % title),
+        q(default),
     )
-    out = subprocess.run(["osascript", "-e", script],
-                         capture_output=True, text=True).stdout.strip()
+    out, err = osa(script)
+    if err and not out:
+        return None, None, True
     if out in ("CANCEL", "", "Hold for now"):
-        return None, None
-    if out == "Something else…":
+        return None, None, False
+    if out == ELLIPSIS:
         ask = (
-            'set r to display dialog "Describe where this should go:" '
+            'tell application "System Events"\n'
+            '    activate\n'
+            '    set r to display dialog "Describe where this should go:" '
             'default answer "" with title "DunamisPub"\n'
+            'end tell\n'
             'return text returned of r'
         )
-        free = subprocess.run(["osascript", "-e", ask],
-                              capture_output=True, text=True).stdout.strip()
-        return "Something else", free
-    return out, None
+        free, _ = osa(ask)
+        return "Something else", free, False
+    return out, None, False
 
 
 def main():
@@ -124,7 +151,6 @@ def main():
     if "--status" not in args:
         settle(project.scrivx, scr.get("settle_seconds", 5))
 
-    # Canary — a missing folder means the format changed or it was renamed.
     if not project.folder_exists(scr["ready_folder"]):
         log("CANARY FAILED: '%s' not found in the binder" % scr["ready_folder"])
         notify("DunamisPub", "Can't find the Ready to Post folder. Watcher paused.")
@@ -133,12 +159,11 @@ def main():
     expected = scr.get("expected_format_version")
     actual = project.format_version
     if expected and actual != expected:
-        log("Format version is %s, expected %s — reads only, no writes." % (actual, expected))
+        log("Format version %s, expected %s — reading only." % (actual, expected))
 
     docs = project.documents_in(scr["ready_folder"])
     labels = project.labels()
-    state = load_state()
-    seen = set(state.get("seen", []))
+    seen = set(load_state().get("seen", []))
 
     if "--status" in args:
         print("Project:  %s" % project.path)
@@ -148,12 +173,12 @@ def main():
         print("Ready to Post: %d document(s)" % len(docs))
         for d in docs:
             mark = "seen" if d["uuid"] in seen else "NEW"
-            print("  [%s] %s  (label: %s)" % (mark, d["title"], labels.get(d["label"], "—")))
+            print("  [%s] %s  (label: %s)"
+                  % (mark, d["title"], labels.get(d["label"], "-")))
         return 0
 
     present = {d["uuid"] for d in docs}
-    # Anything dragged back out becomes eligible again.
-    seen &= present
+    seen &= present                      # dragged back out means eligible again
 
     new = [d for d in docs if d["uuid"] not in seen]
     if not new:
@@ -180,19 +205,25 @@ def main():
         with open(md_path, "w") as fh:
             fh.write("\n".join(front) + body)
 
-        log("Detected '%s' — %d words → %s" % (doc["title"], words, md_path))
+        log("Detected '%s' - %d words -> %s" % (doc["title"], words, md_path))
 
-        suggested = labels.get(doc["label"])
-        dest, free_text = ask_destination(title, config["destinations"], suggested)
+        dest, free_text, failed = ask_destination(
+            title, config["destinations"], labels.get(doc["label"]))
+
+        if failed:
+            log("Prompt could not be displayed. '%s' stays queued." % title)
+            notify("DunamisPub", "Couldn't show the prompt for %s" % title)
+            continue
         if dest is None:
-            log("Held: '%s' — no destination chosen. Will ask again next run." % title)
+            log("Held: '%s' - no destination chosen. Will ask again next run." % title)
             continue
 
         seen.add(doc["uuid"])
-        detail = "%s%s" % (dest, (" — %s" % free_text) if free_text else "")
+        detail = "%s%s" % (dest, (" - %s" % free_text) if free_text else "")
         if dry:
             log("DRY RUN: would publish '%s' to %s" % (title, detail))
-            notify("DunamisPub — dry run", "%s → %s (%d words)" % (title, detail, words))
+            notify("DunamisPub - dry run",
+                   "%s -> %s (%d words)" % (title, detail, words))
         else:
             log("Publishing '%s' to %s" % (title, detail))
             publisher = os.path.join(HERE, "bin", "dunamis-publish")
