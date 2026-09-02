@@ -1,0 +1,62 @@
+{
+  "scrivener": {
+    "project_path": "~/Documents/Writing Desk/Writing Desk.scriv",
+    "ready_folder": "Ready to Post",
+    "published_folder": "Published",
+    "expected_format_version": "23",
+    "settle_seconds": 5
+  },
+
+  "publish": {
+    "schedule_days": 3,
+    "dry_run": true
+  },
+
+  "ai": {
+    "enabled": false,
+    "_comment": "Generates excerpt, tags, slug, and runs a style check. Requires an Anthropic API key in the Keychain under 'dunamispub-anthropic'. With enabled=false you supply excerpt and tags yourself.",
+    "model": "claude-sonnet-4-6",
+    "style_rules": "docs/style-rules.md"
+  },
+
+  "destinations": [
+    {
+      "label": "Adventures in Epsilon",
+      "type": "wordpress",
+      "site_id": "207097055",
+      "url": "https://adventuresinepsilon.com",
+      "keychain_item": "dunamispub-adventuresinepsilon",
+      "archive_repo": "~/Repos/e-writing-desk",
+      "archive_path": "published",
+      "queue_file": "TOPICS.md"
+    },
+    {
+      "label": "OVAC",
+      "type": "wordpress",
+      "url": "https://ovac.club",
+      "keychain_item": "dunamispub-ovac",
+      "archive_repo": null,
+      "archive_path": null,
+      "queue_file": null
+    },
+    {
+      "label": "Northern Lights & Polar Bears",
+      "type": "jekyll",
+      "url": "https://snthor-phd.github.io/polar-bears-2026/",
+      "repo": "~/Repos/polar-bears-2026",
+      "collection_path": "_articles",
+      "deploy": "./deploy.sh"
+    }
+  ],
+
+  "fallback_destination": {
+    "label": "Something Else",
+    "_comment": "Free-text entry at the prompt. The description is handed to the AI step to interpret, or held for manual routing when ai.enabled is false."
+  },
+
+  "notifications": {
+    "method": "osascript",
+    "notify_on_success": true,
+    "notify_on_error": true
+  }
+}
