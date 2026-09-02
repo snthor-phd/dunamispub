@@ -9,6 +9,7 @@ Read-only against the Scrivener project. Nothing here writes to the package.
 
   bin/dunamis-watch            normal run, driven by launchd
   bin/dunamis-watch --status   show what it currently sees, change nothing
+  bin/dunamis-watch --reset    forget seen-state and re-offer what is queued
 """
 
 import json
@@ -160,6 +161,14 @@ def main():
     actual = project.format_version
     if expected and actual != expected:
         log("Format version %s, expected %s — reading only." % (actual, expected))
+
+    if "--reset" in args:
+        # A drag out and straight back in can happen inside one settle window,
+        # so the watcher never observes the document absent and never clears
+        # its seen-state. --reset forgets everything and re-offers whatever
+        # is sitting in the folder.
+        save_state({"seen": []})
+        log("State reset - everything in Ready to Post is eligible again.")
 
     docs = project.documents_in(scr["ready_folder"])
     labels = project.labels()
