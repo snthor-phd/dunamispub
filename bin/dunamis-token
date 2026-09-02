@@ -1,0 +1,53 @@
+#!/bin/bash
+# dunamis-token — exchange a WordPress.com Application Password for an OAuth2
+# access token and store it in the macOS Keychain.
+#
+#   bin/dunamis-token <keychain-item-name>
+#
+# Prompts for everything. Nothing is written to disk, shell history, or this
+# repo — the token goes straight into the Keychain, and the Application
+# Password is used once and discarded.
+#
+# You need, from https://developer.wordpress.com/apps/new :
+#   · Client ID
+#   · Client Secret
+# and, from https://wordpress.com/me/security/application-passwords :
+#   · an Application Password (required if 2FA is on, recommended regardless)
+
+set -euo pipefail
+
+ITEM="${1:-}"
+if [ -z "$ITEM" ]; then
+    echo "Usage: bin/dunamis-token <keychain-item-name>" >&2
+    echo "   eg: bin/dunamis-token dunamispub-adventuresinepsilon" >&2
+    exit 1
+fi
+
+read -r -p "WordPress.com Client ID: " CLIENT_ID
+read -r -s -p "Client Secret: " CLIENT_SECRET; echo
+read -r -p "WordPress.com username: " USERNAME
+read -r -s -p "Application Password: " APP_PASSWORD; echo
+
+echo "Requesting token..."
+RESPONSE=$(curl -sS -X POST "https://public-api.wordpress.com/oauth2/token" \
+    -d "client_id=$CLIENT_ID" \
+    -d "client_secret=$CLIENT_SECRET" \
+    -d "grant_type=password" \
+    -d "username=$USERNAME" \
+    -d "password=$APP_PASSWORD")
+
+TOKEN=$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("access_token",""))' <<<"$RESPONSE")
+
+if [ -z "$TOKEN" ]; then
+    echo "No token returned. Response was:" >&2
+    echo "$RESPONSE" >&2
+    exit 1
+fi
+
+security add-generic-password -U -a "$USERNAME" -s "$ITEM" -w "$TOKEN"
+echo "Token stored in the Keychain as '$ITEM'."
+
+echo -n "Verifying... "
+curl -sS -H "Authorization: Bearer $TOKEN" \
+    "https://public-api.wordpress.com/rest/v1.1/me" \
+    | python3 -c 'import json,sys; d=json.load(sys.stdin); print("authenticated as", d.get("username","?"))'
