@@ -31,7 +31,7 @@ def to_markdown(path):
     return "\n\n".join(paragraphs) + "\n"
 
 
-SPLIT = re.compile(r"^\s*([A-Z]{2,4}-\d+)\s*[—–-]\s*(.+)$")
+SPLIT = re.compile(r"^\s*([A-Z]{2,4}-\d+)(?:\s*[—–]\s*|\s*-{1,2}\s*|\s+)(.+)$")
 
 
 def split_title(binder_title):
@@ -41,8 +41,13 @@ def split_title(binder_title):
     """
     m = SPLIT.match(binder_title or "")
     if m:
-        return m.group(1), m.group(2).strip()
-    return None, (binder_title or "").strip()
+        return m.group(1), _dashes(m.group(2).strip())
+    return None, _dashes((binder_title or "").strip())
+
+
+def _dashes(title):
+    """Typewriter double hyphen to a spaced em dash."""
+    return re.sub(r"\s*--\s*", " — ", title)
 
 
 def slugify(title):

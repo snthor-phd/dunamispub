@@ -23,6 +23,7 @@ sys.path.insert(0, os.path.join(HERE, "lib"))
 
 import binder            # noqa: E402
 import rtf2md            # noqa: E402
+import file_published    # noqa: E402
 
 STATE_DIR = os.path.expanduser("~/Library/Application Support/DunamisPub")
 STATE_FILE = os.path.join(STATE_DIR, "state.json")
@@ -170,6 +171,9 @@ def main():
         save_state({"seen": []})
         log("State reset - everything in Ready to Post is eligible again.")
 
+    if "--status" not in args and not project.is_open:
+        file_published.drain(project.path, log)
+
     docs = project.documents_in(scr["ready_folder"])
     labels = project.labels()
     seen = set(load_state().get("seen", []))
@@ -184,6 +188,10 @@ def main():
             mark = "seen" if d["uuid"] in seen else "NEW"
             print("  [%s] %s  (label: %s)"
                   % (mark, d["title"], labels.get(d["label"], "-")))
+        pending = file_published.load_pending()
+        print("Waiting to file under Published: %d" % len(pending))
+        for p in pending:
+            print("  %s -> Published/%s/%s" % (p.get("title") or p["uuid"], p["dest"], p["year"]))
         return 0
 
     present = {d["uuid"] for d in docs}
